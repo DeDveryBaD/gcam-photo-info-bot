@@ -164,18 +164,27 @@ def card_markup(draft: Draft) -> InlineKeyboardMarkup:
     ])
 
 
+def pick_preview_source(draft: Draft) -> Any:
+    """Cached file_id → freshly rendered preview path → first photo's file_id.
+
+    Documents are skipped in the last step: a document file_id cannot be sent
+    as a photo, and Telegram gives no rendition for RAW files.
+    """
+    if draft.preview_file_id:
+        return draft.preview_file_id
+    if draft.preview_path and Path(draft.preview_path).exists():
+        return Path(draft.preview_path)
+    if draft.items and draft.items[0]["is_photo"]:
+        return draft.items[0]["file_id"]
+    return None
+
+
 async def show_card(context: ContextTypes.DEFAULT_TYPE, draft: Draft) -> None:
     """Create or update the card message. The preview is the message media."""
     text = "📷 " + card_caption(draft)
     markup = card_markup(draft)
 
-    # Media source, in order: cached file_id → freshly rendered preview path →
-    # the first item's own file_id (Telegram photos already carry a preview).
-    media: Any = draft.preview_file_id
-    if media is None and draft.preview_path and Path(draft.preview_path).exists():
-        media = Path(draft.preview_path)
-    if media is None and draft.items:
-        media = draft.items[0]["file_id"]
+    media = pick_preview_source(draft)
 
     if draft.card_message_id is None:
         if media is None:

@@ -70,3 +70,31 @@ def test_preview_raw_without_embedded_thumb(tmp_path: Path):
     src = tmp_path / "clip.dng"
     src.write_bytes(b"\x00" * 1024)
     assert build_preview(src, tmp_path / "out.jpg") is None
+
+
+def test_preview_source_prefers_cached_file_id():
+    from bot.share import pick_preview_source
+
+    draft = Draft(items=[{"file_id": "doc1", "is_photo": False}],
+                  preview_file_id="pv1")
+    assert pick_preview_source(draft) == "pv1"
+
+def test_preview_source_skips_documents(tmp_path: Path):
+    from bot.share import pick_preview_source
+
+    draft = Draft(items=[{"file_id": "doc1", "is_photo": False}])
+    assert pick_preview_source(draft) is None
+
+def test_preview_source_uses_photo_rendition():
+    from bot.share import pick_preview_source
+
+    draft = Draft(items=[{"file_id": "ph1", "is_photo": True}])
+    assert pick_preview_source(draft) == "ph1"
+
+def test_preview_source_uses_local_path(tmp_path: Path):
+    from bot.share import pick_preview_source
+
+    f = tmp_path / "pv.jpg"
+    f.write_bytes(b"x")
+    draft = Draft(items=[{"file_id": "doc1", "is_photo": False}], preview_path=str(f))
+    assert pick_preview_source(draft) == f
