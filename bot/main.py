@@ -24,7 +24,7 @@ from bot.settings import (
 )
 from bot.tgutil import answer_safely, edit_text_safely
 from bot.share import (
-    Draft, UNKNOWN, add_item, clean_model, device_from_exif, parse_filename,
+    Draft, UNKNOWN, add_item, clean_model, exif_probe, parse_filename,
     publish, show_card, start_share, strip_markup,
 )
 
@@ -292,7 +292,12 @@ async def share_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mod, config, edited = parse_filename(filename)
     device = None
     if not is_photo:
-        device = await device_from_exif(context, file_id)
+        # Filename won over EXIF: a name like IMG_..._FCam_X is authored by the
+        # app at save time, Software is only its signature.
+        probe = await exif_probe(context, file_id)
+        device = probe.get("device")
+        if not mod:
+            mod = probe.get("mod")
     await add_item(context, draft, {
         "file_id": file_id, "is_photo": is_photo, "filename": filename,
         "mod": mod, "config": config, "edited": edited, "device": device,

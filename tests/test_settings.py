@@ -15,6 +15,7 @@ RESULT = {
         "Имя файла": "IMG_0001.dng",
         "Формат": "DNG",
         "Размер изображения": "8192x6144",
+        "Субсэмплирование": "4:4:4",
     }
 }
 
@@ -67,3 +68,12 @@ def test_reset_restores_defaults():
     reset(uid)
     assert get(uid).fields == set(DEFAULT_FIELDS)
     assert get(uid).files is False
+
+def test_placeholder_prose_is_hidden_in_card():
+    from bot.settings import UserSettings, render_summary
+
+    sparse = {"summary": {"Модуль камеры": "Название модуля отсутствует; фокусное: 8.7 mm",
+                          "ISO": "1499"}}
+    cfg = UserSettings(fields={"module", "iso"})
+    text = render_summary(sparse, cfg)
+    assert "1499" in text and "отсутствует" not in text

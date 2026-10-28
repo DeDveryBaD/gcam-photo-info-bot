@@ -86,7 +86,16 @@ def clean_model(value: str) -> str:
     return text
 
 
-async def device_from_exif(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> str | None:
+async def exif_probe(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> dict[str, Any]:
+    """Device name and mod signature from EXIF, in one download.
+
+    Returns {} when the file cannot be fetched (>20 MB cap on getFile).
+    """
+    info = await _probe_once(context, file_id)
+    return info or {}
+
+
+async def _probe_once(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> dict[str, Any] | None:
     """Best-effort device name from EXIF. None when the file cannot be fetched."""
     try:
         tg_file = await context.bot.get_file(file_id)
@@ -102,9 +111,13 @@ async def device_from_exif(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> 
         except Exception:  # noqa: BLE001
             return None
     model = str(result["summary"].get("Модель смартфона") or "")
-    if not model or model.startswith("Не определено"):
-        return None
-    return clean_model(model)
+    out: dict[str, Any] = {}
+    if model and not model.startswith("Не определено"):
+        out["device"] = clean_model(model)
+    mod = result.get("mod_from_software")
+    if mod:
+        out["mod"] = mod
+    return out or None
 
 
 async def document_preview(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> Path | None:

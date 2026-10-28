@@ -25,17 +25,23 @@ FIELDS: tuple[tuple[str, str, str], ...] = (
     ("filename", "Имя файла", "Имя файла"),
     ("format", "Формат файла", "Формат"),
     ("size", "Размер снимка", "Размер изображения"),
+    ("subsampling", "Субсэмплирование", "Субсэмплирование"),
     ("timenote", "Пояснение ко времени", "Пояснение времени"),
+    ("modelnote", "Пояснение к модели", "Пояснение модели"),
 )
 
 # Emoji prefix per field, kept in the message body.
 ICONS: dict[str, str] = {
     "model": "📱", "module": "📸", "zoom": "🔎", "iso": "🎚",
     "shutter": "⏱", "date": "📅", "year": "📆", "filename": "📁",
-    "format": "🗂", "size": "📐", "timenote": "🕰",
+    "format": "🗂", "size": "📐", "subsampling": "🎨", "timenote": "🕰", "modelnote": "⚠️",
 }
 
-DEFAULT_FIELDS = frozenset({"model", "module", "zoom", "iso", "shutter", "date"})
+# Subsampling joins the defaults: 4:4:4 vs 4:2:0 is the cheapest way to tell a
+# mod's chroma pipeline apart without opening the file.
+DEFAULT_FIELDS = frozenset(
+    {"model", "module", "zoom", "iso", "shutter", "date", "subsampling"}
+)
 LABELS = {key: label for key, label, _ in FIELDS}
 SUMMARY_KEYS = {key: summary_key for key, _, summary_key in FIELDS}
 
@@ -86,7 +92,9 @@ def render_summary(result: dict[str, Any], cfg: UserSettings) -> str:
         if key not in cfg.fields:
             continue
         value = str(summary.get(summary_key, "")).strip()
-        if not value or value.startswith("Не определено") or value.startswith("Не определён"):
+        # Placeholder prose ("Название модуля отсутствует; …") is noise in the
+        # compact card; the explicit "не определено" forms are equally hidden.
+        if not value or "не определ" in value.lower() or "отсутствует" in value.lower():
             continue
         lines.append(f"{ICONS[key]} {summary_key}: {value}")
     return "\n".join(lines) if lines else "ℹ️ Определяемых параметров в метаданных нет."
