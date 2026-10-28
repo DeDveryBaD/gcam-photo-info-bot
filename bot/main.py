@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -10,13 +11,17 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes, MessageHandler, filters,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+    MessageHandler, filters,
 )
 
 from bot.metadata import extract_metadata, render_txt
+from bot.settings import (
+    FIELDS, UserSettings, get, render_summary, reset, toggle_field, toggle_files,
+)
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -44,11 +49,11 @@ def safe_name(name: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Привет! Я GCam Photo Info — извлекаю технические данные из фотографий.\n\n"
-        "Отправь изображение как ФАЙЛ/ДОКУМЕНТ, чтобы Telegram не сжимал его. "
-        "Обычные фотографии тоже принимаются, но Telegram может удалить часть EXIF.\n\n"
-        "Я покажу модель смартфона, сведения о модуле камеры, зум, ISO, выдержку, "
-        "дату/год и имя файла, а также отправлю полный TXT-отчёт и JSON с метаданными.\n\n"
-        "Команда /help — подробности."
+        "Отправь снимок как ФАЙЛ/ДОКУМЕНТ (скрепка → Отправить файл), чтобы Telegram "
+        "не вырезал EXIF. Обычные «Фотографии» тоже принимаю, но часть данных в них теряется.\n\n"
+        "Отвечаю одним кратким сообщением: смартфон, модуль камеры, зум, ISO, выдержка, дата.\n\n"
+        "/menu — выбрать, какие поля показывать и включать ли отчёты файлами.\n"
+        "/help — подробности и ограничения."
     )
     if update.message:
         await update.message.reply_text(text)
@@ -56,13 +61,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
-            "Поддерживаются JPEG, PNG, WebP, HEIC/HEIF, TIFF и распространённые RAW.\n"
+            "Поддерживаются JPEG, PNG, WebP, HEIC/HEIF, TIFF и распространённые RAW "
+            "(DNG, CR2, CR3, NEF, ARW, RW2, ORF, RAF).\n"
             f"Лимит файла бота: {MAX_FILE_MB} МБ (может быть ниже лимита Telegram).\n\n"
-            "Для максимально точного анализа отправляй оригинал через «Скрепка → Файл», "
-            "а не как сжатую фотографию. Если EXIF не содержит зум или название модуля, "
-            "я укажу, что значение не определено, вместо догадок.\n\n"
-            "Примечание: EXIF может содержать GPS и серийные номера; полный JSON-отчёт "
-            "может включать эти поля. Не пересылай его публично, если не хочешь раскрывать их."
+            "Точность: отправляй оригинал через «Скрепка → Файл». Если EXIF не содержит "
+            "зум или название модуля, я скажу «не определено», вместо догадок.\n\n"
+            "Приватность: EXIF может хранить GPS и серийный номер. Полные отчёты файлами "
+            "по умолчанию выключены — включи их в /menu, если нужен полный дамп.\n\n"
+            "/menu — настройки вывода."
         )
 
 async def _download_input(update: Update, context: ContextTypes.DEFAULT_TYPE, target: Path) -> tuple[str, bool, int]:
@@ -116,28 +122,26 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             result["sha256"] = sha256
             result["source_was_telegram_photo"] = was_photo
 
-            summary = result["summary"]
-            caption = (
-                "📷 Технические данные фотографии\n"
-                f"📱 Смартфон: {summary['Модель смартфона']}\n"
-                f"📸 Модуль камеры: {summary['Модуль камеры']}\n"
-                f"🔎 Зум: {summary['Зум']}\n"
-                f"🎚 ISO: {summary['ISO']}\n"
-                f"⏱ Выдержка: {summary['Выдержка']}\n"
-                f"📅 Дата: {summary['Дата съёмки']} (год: {summary['Год съёмки']})\n"
-                f"📁 Файл: {summary['Имя файла']}"
-            )
+            cfg = get(update.effective_user.id if update.effective_user else None)
+            body = render_summary(result, cfg)
+            caption = f"📷 {body}"
             if was_photo:
                 caption += (
-                    "\n\n⚠️ Получена версия Telegram-фотографии. "
-                    "Для анализа оригинальных метаданных отправляй снимок как файл."
+                    "\n\n⚠️ Это сжатая версия Telegram-фотографии, часть EXIF могла "
+                    "исчезнуть. Пришли снимок как файл — будет точнее."
                 )
-            # Keep caption within Telegram's limit. If unusually long fields exist,
-            # send the concise version in a text message instead.
+            caption += "\n\n/menu — что показывать."
             if len(caption) <= 1000:
                 await msg.reply_text(caption)
             else:
-                await msg.reply_text("📷 Анализ завершён. Основные параметры — в отчётах ниже.")
+                await msg.reply_text("📷 Анализ завершён, но описание вышло слишком длинным.")
+
+            if not cfg.files:
+                log.info("Processed chat=%s user=%s filename=%s fields=%s files=off",
+                         update.effective_chat.id if update.effective_chat else None,
+                         update.effective_user.id if update.effective_user else None,
+                         filename, result["metadata_fields_count"])
+                return
 
             txt_path = tmp_path / "report.txt"
             json_path = tmp_path / "metadata.json"
@@ -146,7 +150,6 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"Получено как сжатая Telegram-фотография: {'да' if was_photo else 'нет'}\n",
                 encoding="utf-8",
             )
-            import json
             json_path.write_text(
                 json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n",
                 encoding="utf-8",
@@ -191,6 +194,67 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "Произошла внутренняя ошибка при обработке. Попробуй отправить оригинал как файл."
             )
 
+def _menu_markup(cfg: UserSettings) -> InlineKeyboardMarkup:
+    rows = []
+    for key, label, _ in FIELDS:
+        mark = "✅" if key in cfg.fields else "▫️"
+        rows.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"f:{key}")])
+    rows.append([InlineKeyboardButton(
+        ("✅" if cfg.files else "▫️") + " Прикладывать отчёты файлами",
+        callback_data="files")])
+    rows.append([
+        InlineKeyboardButton("♻️ Сбросить", callback_data="reset"),
+        InlineKeyboardButton("✔️ Готово", callback_data="close"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+MENU_TEXT = None
+
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    cfg = get(user.id if user else None)
+    text = (
+        "Что показывать в ответе на снимок.\n\n"
+        "Отчёты файлами: "
+        + ("включены — бот пришлёт report.txt, metadata.json и копию снимка."
+           if cfg.files else "выключены — только текст.")
+    )
+    await update.message.reply_text(text, reply_markup=_menu_markup(cfg))
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    data = q.data or ""
+    user = update.effective_user
+    uid = user.id if user else 0
+    cfg = get(uid)
+
+    if data.startswith("f:"):
+        key = data[2:]
+        if not toggle_field(uid, key):
+            await q.answer("Нужна хотя бы одна строка в ответе.", show_alert=False)
+    elif data == "files":
+        toggle_files(uid)
+    elif data == "reset":
+        reset(uid)
+        cfg = get(uid)
+        await q.answer("Настройки сброшены.")
+    elif data == "close":
+        await q.edit_message_text("Готово. Присылай снимок — отвечу по этим настройкам.")
+        return
+
+    text = (
+        "Что показывать в ответе на снимок.\n\n"
+        "Отчёты файлами: "
+        + ("включены — бот пришлёт report.txt, metadata.json и копию снимка."
+           if cfg.files else "выключены — только текст.")
+    )
+    await q.edit_message_text(text, reply_markup=_menu_markup(cfg))
+    await q.answer()
+
+
 async def unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
@@ -201,6 +265,8 @@ def build_app() -> Application:
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(f:|files|reset|close)"))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, process_image))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, unsupported))
     return app
