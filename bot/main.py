@@ -209,6 +209,12 @@ def main() -> None:
     if not TOKEN:
         raise SystemExit("Не задан TELEGRAM_BOT_TOKEN. Скопируй .env.example в .env и укажи токен.")
     import time
+    # Render free web services must bind $PORT or the deploy is killed, even
+    # though polling is outbound-only. Serve a health endpoint on $PORT.
+    port = os.getenv("PORT")
+    if port:
+        from bot.health import start_health_server
+        start_health_server(int(port))
     # Polling: works everywhere, needs no external URL. Outbound getUpdates
     # traffic also keeps the Render free instance awake. Rebuild the app on
     # every restart: run_polling shuts the loop down when it exits.
