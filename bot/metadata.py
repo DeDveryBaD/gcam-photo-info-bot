@@ -9,6 +9,7 @@ from typing import Any
 
 # ExifTool is deliberately used as a separate executable: it supports many more
 # vendor-specific tags and MakerNotes than basic Python EXIF libraries.
+OFFSET_TAGS = ("OffsetTimeOriginal", "OffsetTime", "TimeZone", "GMTOffset")
 DATE_TAGS = (
     "DateTimeOriginal", "CreateDate", "DateCreated", "MediaCreateDate",
     "TrackCreateDate", "ModifyDate", "FileModifyDate",
@@ -55,6 +56,65 @@ def _human_shutter(value: Any, tags: dict[str, Any]) -> str:
         except ValueError:
             pass
     return s + ("" if s.endswith(("с", "sec", "s")) else " с")
+
+def _offset_hours(tags: dict[str, Any]) -> float | None:
+    """UTC offset stored in EXIF, e.g. "+05:00" -> 5.0. None when absent."""
+    raw = _first(tags, OFFSET_TAGS)
+    if raw is None:
+        return None
+    match = re.search(r"([+-])(\d{1,2}):?(\d{2})?", str(raw))
+    if not match:
+        return None
+    sign = -1 if match.group(1) == "-" else 1
+    hours = int(match.group(2))
+    minutes = int(match.group(3) or 0)
+    return sign * (hours + minutes / 60)
+
+
+def reconcile_capture_time(date_value: Any, tags: dict[str, Any],
+                           filename: str) -> tuple[str, str, str | None]:
+    """Return (display, year, note).
+
+    EXIF has no mandatory timezone for DateTimeOriginal, and GCam mods disagree:
+    some write device-local time, others write UTC. The filename stamp
+    (IMG_YYYYMMDD_HHMMSS) is generated locally by the camera, so it is the only
+    in-file witness of wall-clock time. When the two disagree by whole hours,
+    report the filename time and say why.
+    """
+    date_text, year = _normalise_date(date_value)
+    if date_value is None:
+        return date_text, year, None
+
+    stamp = re.search(r"(\d{4})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})", filename or "")
+    if not stamp:
+        offset = _offset_hours(tags)
+        note = None
+        if offset is not None and abs(offset) >= 1:
+            note = f"EXIF-смещение {offset:+g} ч; время локальное"
+        return date_text, year, note
+
+    from datetime import datetime as _dt
+
+    try:
+        file_dt = _dt(int(stamp.group(1)), int(stamp.group(2)), int(stamp.group(3)),
+                      int(stamp.group(4)), int(stamp.group(5)), int(stamp.group(6)))
+    except ValueError:
+        return date_text, year, None
+    try:
+        exif_dt = _dt.strptime(str(date_value)[:19], "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return date_text, year, None
+
+    delta = (file_dt - exif_dt).total_seconds() / 3600
+    if abs(delta) < 1:
+        return date_text, year, None
+    if abs(delta - round(delta)) > 0.02:
+        return (file_dt.strftime("%d.%m.%Y %H:%M:%S"), str(file_dt.year),
+                f"EXIF '{date_text}' расходится с именем файла не на целые часы")
+    return (file_dt.strftime("%d.%m.%Y %H:%M:%S"), str(file_dt.year),
+            f"EXIF хранил UTC ({date_text}); по имени файла снято в "
+            f"{file_dt.strftime('%H:%M:%S')} локального времени ({delta:+g} ч)")
+
 
 def _normalise_date(value: Any) -> tuple[str, str]:
     if value is None:
@@ -149,8 +209,8 @@ def extract_metadata(path: Path, original_filename: str) -> dict[str, Any]:
     # Flattened lookup preserves group-qualified names; raw data remains complete.
     tags = dict(raw)
     date_value = _first(tags, DATE_TAGS)
-    date_text, year = _normalise_date(date_value)
     file_name = original_filename or str(_first(tags, ("FileName",)) or path.name)
+    date_text, year, time_note = reconcile_capture_time(date_value, tags, file_name)
     file_type = _first(tags, ("FileType", "MIMEType")) or path.suffix.lstrip(".").upper() or "Не определён"
 
     summary = {
@@ -164,6 +224,7 @@ def extract_metadata(path: Path, original_filename: str) -> dict[str, Any]:
         "Год съёмки": year,
         "Формат": str(file_type),
         "Размер изображения": str(_first(tags, ("ImageSize", "ImageWidth")) or "Не определено"),
+        "Пояснение времени": time_note or "",
         "Примечание": "Значения показаны только при наличии соответствующих данных; модуль камеры и зум могут не записываться в EXIF.",
     }
     return {

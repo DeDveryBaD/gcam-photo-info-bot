@@ -49,7 +49,6 @@ class Draft:
     mod: str = UNKNOWN
     config: str = UNKNOWN
     edited: bool = False
-    send_originals: bool = True
     preview_file_id: str | None = None
     preview_path: str | None = None  # local JPEG awaiting upload, cleared after
     card_chat_id: int | None = None
@@ -134,7 +133,7 @@ def card_caption(draft: Draft) -> str:
         f"⚙️ {draft.config}",
         f"✂️ {'Edit' if draft.edited else 'No edit'}",
         "",
-        f"🗂 {len(draft.items)} файл(ов)",
+        f"🗂 {len(draft.items)} файл(ов) в альбоме",
     ]
     if draft.awaiting:
         label = {"device": "устройство", "mod": "мод", "config": "конфиг"}[draft.awaiting]
@@ -154,9 +153,6 @@ def card_markup(draft: Draft) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"⚙️ {draft.config}", callback_data="sh:config")],
         [InlineKeyboardButton(
             "✂️ Edit" if draft.edited else "✂️ No edit", callback_data="sh:edited")],
-        [InlineKeyboardButton(
-            "📎 Оригиналы: " + ("да" if draft.send_originals else "нет"),
-            callback_data="sh:originals")],
         [
             InlineKeyboardButton("🚀 Опубликовать", callback_data="sh:publish"),
             InlineKeyboardButton("🗑 Отмена", callback_data="sh:cancel"),
@@ -273,17 +269,12 @@ def _media(item: dict[str, Any], cap: str | None):
 
 
 async def publish(context: ContextTypes.DEFAULT_TYPE, draft: Draft) -> str:
-    """Send the album to the archive channel. Returns a human-readable line."""
-    import os
-
-    target = (os.getenv("ARCHIVE_CHANNEL") or "").strip()
-    if not target:
-        return (
-            "Канал-архив не настроен. Создай канал, добавь бота админом и задай "
-            "переменную ARCHIVE_CHANNEL (например @your_channel или -100…)."
-        )
+    """Post the album into the same chat where /share_photo was started."""
     if not draft.ready:
         return "Сначала пришли хотя бы одно фото."
+    target = draft.card_chat_id
+    if target is None:
+        return "Не знаю, куда публиковать: карточка не привязана к чату."
 
     cap = publish_caption(draft)
     media = [_media(item, cap if i == 0 else None) for i, item in enumerate(draft.items)]
@@ -294,4 +285,21 @@ async def publish(context: ContextTypes.DEFAULT_TYPE, draft: Draft) -> str:
         return f"Не опубликовал: {exc}"
     log.info("Published %d items to %s (msgs %s)",
              len(media), target, [m.message_id for m in sent])
-    return f"Опубликовано: {len(media)} файл(ов) в {target}."
+    return f"Опубликовано: {len(media)} файл(ов)."
+
+
+async def strip_markup(bot, draft: Draft) -> None:
+    """Remove buttons from the card. Tolerates 'nothing changed'."""
+    from telegram.error import BadRequest
+
+    if draft.card_message_id is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=draft.card_chat_id, message_id=draft.card_message_id,
+            reply_markup=None)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    except Exception:  # noqa: BLE001 - the card is cosmetic, never break the flow
+        pass

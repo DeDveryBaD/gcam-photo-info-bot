@@ -25,13 +25,14 @@ FIELDS: tuple[tuple[str, str, str], ...] = (
     ("filename", "Имя файла", "Имя файла"),
     ("format", "Формат файла", "Формат"),
     ("size", "Размер снимка", "Размер изображения"),
+    ("timenote", "Пояснение ко времени", "Пояснение времени"),
 )
 
 # Emoji prefix per field, kept in the message body.
 ICONS: dict[str, str] = {
     "model": "📱", "module": "📸", "zoom": "🔎", "iso": "🎚",
     "shutter": "⏱", "date": "📅", "year": "📆", "filename": "📁",
-    "format": "🗂", "size": "📐",
+    "format": "🗂", "size": "📐", "timenote": "🕰",
 }
 
 DEFAULT_FIELDS = frozenset({"model", "module", "zoom", "iso", "shutter", "date"})

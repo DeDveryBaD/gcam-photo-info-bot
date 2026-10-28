@@ -22,9 +22,10 @@ from bot.metadata import extract_metadata, render_txt
 from bot.settings import (
     FIELDS, UserSettings, get, render_summary, reset, toggle_field, toggle_files,
 )
+from bot.tgutil import answer_safely, edit_text_safely
 from bot.share import (
     Draft, UNKNOWN, add_item, clean_model, device_from_exif, parse_filename,
-    publish, show_card, start_share,
+    publish, show_card, start_share, strip_markup,
 )
 
 load_dotenv()
@@ -242,15 +243,16 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data.startswith("f:"):
         key = data[2:]
         if not toggle_field(uid, key):
-            await q.answer("Нужна хотя бы одна строка в ответе.", show_alert=False)
+            await answer_safely(q, "Нужна хотя бы одна строка в ответе.")
     elif data == "files":
         toggle_files(uid)
     elif data == "reset":
         reset(uid)
         cfg = get(uid)
-        await q.answer("Настройки сброшены.")
+        await answer_safely(q, "Настройки сброшены.")
     elif data == "close":
-        await q.edit_message_text("Готово. Присылай снимок — отвечу по этим настройкам.")
+        await edit_text_safely(q, "Готово. Присылай снимок — отвечу по этим настройкам.")
+        await answer_safely(q)
         return
 
     text = (
@@ -259,8 +261,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         + ("включены — бот пришлёт report.txt, metadata.json и копию снимка."
            if cfg.files else "выключены — только текст.")
     )
-    await q.edit_message_text(text, reply_markup=_menu_markup(cfg))
-    await q.answer()
+    await edit_text_safely(q, text, reply_markup=_menu_markup(cfg))
+    await answer_safely(q)
 
 
 async def unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -318,8 +320,7 @@ async def share_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """/cancel inside the conversation: drop the draft."""
     draft = context.user_data.pop("draft", None)
     if isinstance(draft, Draft) and draft.card_message_id:
-        await context.bot.edit_message_reply_markup(
-            chat_id=draft.card_chat_id, message_id=draft.card_message_id, reply_markup=None)
+        await strip_markup(context.bot, draft)
     await update.effective_message.reply_text("Черновик отменён.")
     return ConversationHandler.END
 
@@ -329,7 +330,8 @@ async def share_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = q.data or ""
     draft = context.user_data.get("draft")
     if not isinstance(draft, Draft):
-        await q.answer("Черновик не найден. Начни заново: /share_photo", show_alert=True)
+        await answer_safely(q, "Черновик не найден. Начни заново: /share_photo",
+                            show_alert=True)
         return ConversationHandler.END
     action = data.split(":", 1)[1] if ":" in data else data
 
@@ -339,15 +341,10 @@ async def share_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         draft.awaiting = None if data.endswith("none") else data.split(":", 2)[-1]
     elif action == "edited":
         draft.edited = not draft.edited
-    elif action == "originals":
-        draft.send_originals = not draft.send_originals
     elif action == "publish":
+        await answer_safely(q)
         result = await publish(context, draft)
-        await q.answer()
-        if draft.card_message_id:
-            await context.bot.edit_message_reply_markup(
-                chat_id=draft.card_chat_id, message_id=draft.card_message_id,
-                reply_markup=None)
+        await strip_markup(context.bot, draft)
         await context.bot.send_message(chat_id=q.message.chat_id, text=result)
         if result.startswith("Опубликовано"):
             context.user_data.pop("draft", None)
@@ -355,20 +352,24 @@ async def share_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return SHARE
     elif action == "cancel":
         context.user_data.pop("draft", None)
-        if draft.card_message_id:
-            await context.bot.edit_message_reply_markup(
-                chat_id=draft.card_chat_id, message_id=draft.card_message_id,
-                reply_markup=None)
-        await q.answer("Черновик удалён.")
+        await strip_markup(context.bot, draft)
+        await answer_safely(q, "Черновик удалён.")
         return ConversationHandler.END
 
-    await q.answer()
+    await answer_safely(q)
     await show_card(context, draft)
     return SHARE
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log every unhandled update error so a callback never hangs silently."""
+    log.error("Unhandled error while processing %s", type(update).__name__,
+              exc_info=context.error)
+
+
 def build_app() -> Application:
     app = Application.builder().token(TOKEN).build()
+    app.add_error_handler(on_error)
     # /share_photo owns the chat while a draft is open; ConversationHandler
     # gates on its stored state, so the analyzer below stays untouched.
     app.add_handler(ConversationHandler(
@@ -401,6 +402,13 @@ def main() -> None:
     if port:
         from bot.health import start_health_server
         start_health_server(int(port))
+        # Render free sleeps after ~15 min without INBOUND requests, and polling
+        # is outbound-only: a sleeping box never wakes for a new Telegram message.
+        # Ping our own public URL to keep the idle timer reset.
+        public = (os.getenv("RENDER_EXTERNAL_URL") or "").strip()
+        if public:
+            from bot.keepalive import start as start_keepalive
+            start_keepalive(public.rstrip("/") + "/")
     # Polling: works everywhere, needs no external URL. Outbound getUpdates
     # traffic also keeps the Render free instance awake. Rebuild the app on
     # every restart: run_polling shuts the loop down when it exits.
