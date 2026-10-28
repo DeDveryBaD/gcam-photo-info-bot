@@ -1,0 +1,16 @@
+services:
+  gcam-photo-info-bot:
+    build: .
+    container_name: gcam-photo-info-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TMPDIR: /tmp/gcam-bot
+    read_only: true
+    tmpfs:
+      - /tmp/gcam-bot:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
