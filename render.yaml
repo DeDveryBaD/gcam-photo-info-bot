@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: gcam-photo-info-bot
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MAX_FILE_MB
+        value: "20"
+      - key: KEEP_TEMP_FILES
+        value: "false"
+      - key: LOG_LEVEL
+        value: "INFO"

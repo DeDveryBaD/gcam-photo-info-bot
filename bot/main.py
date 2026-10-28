@@ -206,6 +206,22 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, process_image))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, unsupported))
     log.info("Bot starting")
+
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    if base_url:
+        # Webhook mode (Render free web service): bind $PORT, health on "/".
+        port = int(os.getenv("PORT", "10000"))
+        secret = os.getenv("WEBHOOK_SECRET", TOKEN[-16:])
+        run = app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=secret,
+            webhook_url=f"{base_url.rstrip('/')}/{secret}",
+            allowed_updates=Update.ALL_TYPES,
+        )
+        log.info("Webhook mode on port %d", port)
+        return run
+    log.info("Polling mode")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
