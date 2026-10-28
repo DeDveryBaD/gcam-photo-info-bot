@@ -15,12 +15,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
-    MessageHandler, filters,
+    ConversationHandler, MessageHandler, filters,
 )
 
 from bot.metadata import extract_metadata, render_txt
 from bot.settings import (
     FIELDS, UserSettings, get, render_summary, reset, toggle_field, toggle_files,
+)
+from bot.share import (
+    Draft, UNKNOWN, add_item, clean_model, device_from_exif, parse_filename,
+    publish, show_card, start_share,
 )
 
 load_dotenv()
@@ -36,8 +40,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("gcam-photo-info")
 
-ALLOWED_EXTENSIONS = {
-    ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".webp", ".heic", ".heif",
+# Conversation state for /share_photo.
+SHARE = "share"
+
+ALLOWED_EXTENSIONS = {    ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".webp", ".heic", ".heif",
     ".dng", ".cr2", ".cr3", ".nef", ".arw", ".rw2", ".orf", ".raf",
 }
 
@@ -53,6 +59,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "не вырезал EXIF. Обычные «Фотографии» тоже принимаю, но часть данных в них теряется.\n\n"
         "Отвечаю одним кратким сообщением: смартфон, модуль камеры, зум, ISO, выдержка, дата.\n\n"
         "/menu — выбрать, какие поля показывать и включать ли отчёты файлами.\n"
+        "/share_photo — выложить снимок в архив: карточка с превью и анкетой "
+        "(устройство, мод, конфиг, обработка).\n"
         "/help — подробности и ограничения."
     )
     if update.message:
@@ -68,7 +76,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "зум или название модуля, я скажу «не определено», вместо догадок.\n\n"
             "Приватность: EXIF может хранить GPS и серийный номер. Полные отчёты файлами "
             "по умолчанию выключены — включи их в /menu, если нужен полный дамп.\n\n"
-            "/menu — настройки вывода."
+            "/menu — настройки вывода. /share_photo — публикация в архив с анкетой."
         )
 
 async def _download_input(update: Update, context: ContextTypes.DEFAULT_TYPE, target: Path) -> tuple[str, bool, int]:
@@ -261,8 +269,121 @@ async def unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Пришли фотографию или изображение как файл. Для полного EXIF лучше использовать «Отправить как файл»."
         )
 
+async def share_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Consume photos/documents while a /share_photo draft is open."""
+    draft = context.user_data.get("draft")
+    msg = update.effective_message
+    if not isinstance(draft, Draft) or msg is None:
+        return SHARE
+    if msg.document:
+        file_id = msg.document.file_id
+        filename = msg.document.file_name or "photo"
+        is_photo = False
+    elif msg.photo:
+        file_id = msg.photo[-1].file_id
+        filename = f"telegram_photo_{msg.message_id}.jpg"
+        is_photo = True
+    else:
+        await msg.reply_text("Пришли фото или файл.")
+        return
+
+    mod, config, edited = parse_filename(filename)
+    device = None
+    if not is_photo:
+        device = await device_from_exif(context, file_id)
+    await add_item(context, draft, {
+        "file_id": file_id, "is_photo": is_photo, "filename": filename,
+        "mod": mod, "config": config, "edited": edited, "device": device,
+    })
+    return SHARE
+
+
+async def share_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Free-text answers to the 'enter new value' prompt."""
+    draft = context.user_data.get("draft")
+    if not isinstance(draft, Draft) or not draft.awaiting:
+        return SHARE
+    value = " ".join((update.effective_message.text or "").split())[:80]
+    field = draft.awaiting
+    draft.awaiting = None
+    if value:
+        setattr(draft, {"device": "device", "mod": "mod", "config": "config"}[field],
+                clean_model(value) if field == "device" else value)
+    await update.effective_message.reply_text("Обновил карточку.")
+    await show_card(context, draft)
+    return SHARE
+
+
+async def share_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """/cancel inside the conversation: drop the draft."""
+    draft = context.user_data.pop("draft", None)
+    if isinstance(draft, Draft) and draft.card_message_id:
+        await context.bot.edit_message_reply_markup(
+            chat_id=draft.card_chat_id, message_id=draft.card_message_id, reply_markup=None)
+    await update.effective_message.reply_text("Черновик отменён.")
+    return ConversationHandler.END
+
+
+async def share_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    data = q.data or ""
+    draft = context.user_data.get("draft")
+    if not isinstance(draft, Draft):
+        await q.answer("Черновик не найден. Начни заново: /share_photo", show_alert=True)
+        return ConversationHandler.END
+    action = data.split(":", 1)[1] if ":" in data else data
+
+    if action in ("device", "mod", "config"):
+        draft.awaiting = None if draft.awaiting == action else action
+    elif action == "await":
+        draft.awaiting = None if data.endswith("none") else data.split(":", 2)[-1]
+    elif action == "edited":
+        draft.edited = not draft.edited
+    elif action == "originals":
+        draft.send_originals = not draft.send_originals
+    elif action == "publish":
+        result = await publish(context, draft)
+        await q.answer()
+        if draft.card_message_id:
+            await context.bot.edit_message_reply_markup(
+                chat_id=draft.card_chat_id, message_id=draft.card_message_id,
+                reply_markup=None)
+        await context.bot.send_message(chat_id=q.message.chat_id, text=result)
+        if result.startswith("Опубликовано"):
+            context.user_data.pop("draft", None)
+            return ConversationHandler.END
+        return SHARE
+    elif action == "cancel":
+        context.user_data.pop("draft", None)
+        if draft.card_message_id:
+            await context.bot.edit_message_reply_markup(
+                chat_id=draft.card_chat_id, message_id=draft.card_message_id,
+                reply_markup=None)
+        await q.answer("Черновик удалён.")
+        return ConversationHandler.END
+
+    await q.answer()
+    await show_card(context, draft)
+    return SHARE
+
+
 def build_app() -> Application:
     app = Application.builder().token(TOKEN).build()
+    # /share_photo owns the chat while a draft is open; ConversationHandler
+    # gates on its stored state, so the analyzer below stays untouched.
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("share_photo", start_share)],
+        states={SHARE: [
+            CallbackQueryHandler(share_callback, pattern=r"^sh:"),
+            CommandHandler("cancel", share_cancel),
+            MessageHandler(filters.PHOTO | filters.Document.ALL, share_message),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, share_text),
+        ]},
+        fallbacks=[],
+        name="share",
+        key="user",
+        allow_reentry=True,
+    ))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu))
