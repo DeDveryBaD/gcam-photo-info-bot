@@ -381,7 +381,6 @@ def build_app() -> Application:
         ]},
         fallbacks=[],
         name="share",
-        key="user",
         allow_reentry=True,
     ))
     app.add_handler(CommandHandler("start", start))
